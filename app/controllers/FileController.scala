@@ -6,6 +6,7 @@ import javax.inject.Inject
 import play.api.libs.json.Json
 import play.api.mvc.{AbstractController, ControllerComponents}
 
+import scala.annotation.tailrec
 import scala.io.Source
 
 class FileController @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
@@ -23,10 +24,9 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
         (headers zip records).toMap
       }
 
-      Json.prettyPrint(Json.toJson(recordsMap))
+      val headerTypes = generateHeaderTypes(headers, recordsMap) //Use header types in ES
+      Json.prettyPrint(Json.toJson(headerTypes))
     }.getOrElse("{data: null}")
-
-    println(recordsJson)
 
     Ok(recordsJson).as("application/json")
   }
@@ -36,24 +36,54 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
     *   A String
     *   A number
     *   An object (can't be passed in a CSV data)
-    *   An array
+    *   An array (A field may or may not have comma separated values. We will focus on no to implement for now.)
     *   A boolean
     *   A null
     *
     * --> The goal of this method is to create the JSON out of map so that
     * String values which can be number be converted to the number.
+    *
+    * @param headers The headers in the CSV file
+    * @param records The records (rows) in CSV file
     */
-  private def formTypedJson(jsonMap: Map[String, String]): Unit = {
-    jsonMap
+  private def generateHeaderTypes(headers: List[String], records: List[Map[String, String]]): Map[String, String] = {
+    def generateType(header: String, records: List[Map[String, String]]): String = {
+      if(records.forall{singleRecordRow => isBooleanRecord(singleRecordRow.get(header))}) {
+        "boolean"
+      } else if(records.forall(singleRecordRow => isDoubleRecord(singleRecordRow.get(header)))) {
+        "double"
+      } else {
+        "text"
+      }
+    }
+
+    headers.foldLeft(Map.empty[String, String]) ((headerTypeMap, header) =>
+      headerTypeMap + (header -> generateType(header, records))
+    )
   }
 
-  private def specializeRecord(recordList: List[String]): List[Any] = {
-    recordList.map { strRecord =>
-      if(strRecord.matches("([0-9]+)(.{1})([0-9]*)")) {
-        strRecord.toDouble
-      } else {
-        strRecord
-      }
+  def isDoubleRecord(recordOptValue: Option[String]): Boolean = {
+    val doublePattern = "((\\d+)(\\.{1})(\\d+)?)|([0-9]+)|(([0])(\\.)(\\d+))"
+    recordOptValue.getOrElse("%").trim.matches(doublePattern)
+  }
+
+  def isBooleanRecord(recordOptValue: Option[String]): Boolean = {
+    List("true", "false").contains(recordOptValue.getOrElse("").toLowerCase.trim)
+  }
+
+  @tailrec
+  private def createStringToDoubleJsonMap(jsonMap: Map[String, String],
+                                   resultMap: Map[String, Double] = Map.empty[String, Double]): Map[String, Double] = {
+    if(jsonMap.isEmpty) {
+      return resultMap
+    }
+
+    val firstKeyValue = jsonMap.toList.head
+
+    if(firstKeyValue._2.matches("((\\d+)(\\.{1})?(\\d+))|(^(0)(.)(\\d+))")) {
+      createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap + (firstKeyValue._1 -> firstKeyValue._1.toDouble))
+    } else {
+      createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap)
     }
   }
 
