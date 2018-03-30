@@ -1,17 +1,18 @@
 package controllers
 
-import java.nio.file.Paths
-
+import es.ESIndexMappings
 import javax.inject.Inject
-import play.api.libs.json.Json
+import play.api.libs.json.{Format, Json}
+import play.api.libs.ws._
 import play.api.mvc.{AbstractController, ControllerComponents}
 
 import scala.annotation.tailrec
 import scala.io.Source
 
-class FileController @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
+class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esIndexMappings: ESIndexMappings)(implicit ws: WSClient = wsClient)
+  extends AbstractController(cc) {
 
-  def readCSVFile() = Action(parse.multipartFormData){ implicit request =>
+  def readCSVFile() = Action(parse.multipartFormData) { implicit request =>
 
     val recordsJson = request.body.file("uploadedFile").map { uploadedFile =>
 
@@ -25,6 +26,9 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
       }
 
       val headerTypes = generateHeaderTypes(headers, recordsMap) //Use header types in ES
+
+      esIndexMappings.createIndexAndMappings("CSVData", uploadedFile.ref.getName, headerTypes)
+
       Json.prettyPrint(Json.toJson(headerTypes))
     }.getOrElse("{data: null}")
 
@@ -33,12 +37,12 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
 
   /**
     * The json can have multiple type:
-    *   A String
-    *   A number
-    *   An object (can't be passed in a CSV data)
-    *   An array (A field may or may not have comma separated values. We will focus on no to implement for now.)
-    *   A boolean
-    *   A null
+    * A String
+    * A number
+    * An object (can't be passed in a CSV data)
+    * An array (A field may or may not have comma separated values. We will focus on no to implement for now.)
+    * A boolean
+    * A null
     *
     * --> The goal of this method is to create the JSON out of map so that
     * String values which can be number be converted to the number.
@@ -48,18 +52,25 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
     */
   private def generateHeaderTypes(headers: List[String], records: List[Map[String, String]]): Map[String, String] = {
     def generateType(header: String, records: List[Map[String, String]]): String = {
-      if(records.forall{singleRecordRow => isBooleanRecord(singleRecordRow.get(header))}) {
+      if (records.forall { singleRecordRow => isBooleanRecord(singleRecordRow.get(header)) }) {
         "boolean"
-      } else if(records.forall(singleRecordRow => isDoubleRecord(singleRecordRow.get(header)))) {
+      } else if (records.forall(singleRecordRow => isLongRecord(singleRecordRow.get(header)))) {
+        "long"
+      } else if (records.forall(singleRecordRow => isDoubleRecord(singleRecordRow.get(header)))) {
         "double"
       } else {
         "text"
       }
     }
 
-    headers.foldLeft(Map.empty[String, String]) ((headerTypeMap, header) =>
+    headers.foldLeft(Map.empty[String, String])((headerTypeMap, header) =>
       headerTypeMap + (header -> generateType(header, records))
     )
+  }
+
+  def isLongRecord(recordOptValue: Option[String]): Boolean = {
+    val doublePattern = "\\d+"
+    recordOptValue.getOrElse("%").trim.matches(doublePattern)
   }
 
   def isDoubleRecord(recordOptValue: Option[String]): Boolean = {
@@ -73,18 +84,52 @@ class FileController @Inject()(cc: ControllerComponents) extends AbstractControl
 
   @tailrec
   private def createStringToDoubleJsonMap(jsonMap: Map[String, String],
-                                   resultMap: Map[String, Double] = Map.empty[String, Double]): Map[String, Double] = {
-    if(jsonMap.isEmpty) {
+                                          resultMap: Map[String, Double] = Map.empty[String, Double]): Map[String, Double] = {
+    if (jsonMap.isEmpty) {
       return resultMap
     }
 
     val firstKeyValue = jsonMap.toList.head
 
-    if(firstKeyValue._2.matches("((\\d+)(\\.{1})?(\\d+))|(^(0)(.)(\\d+))")) {
+    if (firstKeyValue._2.matches("((\\d+)(\\.{1})?(\\d+))|(^(0)(.)(\\d+))")) {
       createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap + (firstKeyValue._1 -> firstKeyValue._1.toDouble))
     } else {
       createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap)
     }
   }
+
+  private def createIndexAndMappings(indexName: String, mappingMap: Map[String, String])(implicit ws: WSClient): Unit = {
+
+    case class IndexSettings(number_of_shards: Int, number_of_replicas: Int)
+    object IndexSettings {
+      implicit val _: Format[IndexSettings] = Json.format
+    }
+
+    case class Type(`type`: String)
+    object Type {
+      implicit val _: Format[Type] = Json.format
+    }
+
+    def generatedTypesForHeaders(headerMappings: Map[String, String]): Map[String, Type] = {
+      headerMappings.foldLeft(Map.empty[String, Type]) { (headerTypeMap, headerMappingsTuple) =>
+        headerTypeMap + (headerMappingsTuple._1 -> Type(headerMappingsTuple._2))
+      }
+    }
+
+    case class Mappings(mappings: String)
+    object Mappings {
+      def apply(typeName: String, headerMappings: Map[String, String]): Mappings = {
+        val properties = "{\n\"properties\" : " +
+          Json.prettyPrint(Json.toJson(generatedTypesForHeaders(headerMappings))) + "\n}"
+        new Mappings(s"{ ${typeName} : $properties }")
+      }
+
+      implicit val _: Format[Mappings] = Json.format[Mappings]
+
+    }
+
+    case class IndexAndMapping(settings: IndexSettings, mappings: Mappings)
+  }
+
 
 }
