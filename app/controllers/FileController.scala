@@ -1,5 +1,7 @@
 package controllers
 
+import java.nio.file.Paths
+
 import es.ESIndexMappings
 import javax.inject.Inject
 import play.api.libs.json.{Format, Json}
@@ -27,7 +29,7 @@ class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esI
 
       val headerTypes = generateHeaderTypes(headers, recordsMap) //Use header types in ES
 
-      esIndexMappings.createIndexAndMappings("CSVData", uploadedFile.ref.getName, headerTypes)
+      esIndexMappings.createIndexAndMappings("csv_data", Paths.get(uploadedFile.filename).getFileName.toString.toLowerCase, headerTypes)
 
       Json.prettyPrint(Json.toJson(headerTypes))
     }.getOrElse("{data: null}")
@@ -97,39 +99,5 @@ class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esI
       createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap)
     }
   }
-
-  private def createIndexAndMappings(indexName: String, mappingMap: Map[String, String])(implicit ws: WSClient): Unit = {
-
-    case class IndexSettings(number_of_shards: Int, number_of_replicas: Int)
-    object IndexSettings {
-      implicit val _: Format[IndexSettings] = Json.format
-    }
-
-    case class Type(`type`: String)
-    object Type {
-      implicit val _: Format[Type] = Json.format
-    }
-
-    def generatedTypesForHeaders(headerMappings: Map[String, String]): Map[String, Type] = {
-      headerMappings.foldLeft(Map.empty[String, Type]) { (headerTypeMap, headerMappingsTuple) =>
-        headerTypeMap + (headerMappingsTuple._1 -> Type(headerMappingsTuple._2))
-      }
-    }
-
-    case class Mappings(mappings: String)
-    object Mappings {
-      def apply(typeName: String, headerMappings: Map[String, String]): Mappings = {
-        val properties = "{\n\"properties\" : " +
-          Json.prettyPrint(Json.toJson(generatedTypesForHeaders(headerMappings))) + "\n}"
-        new Mappings(s"{ ${typeName} : $properties }")
-      }
-
-      implicit val _: Format[Mappings] = Json.format[Mappings]
-
-    }
-
-    case class IndexAndMapping(settings: IndexSettings, mappings: Mappings)
-  }
-
 
 }
