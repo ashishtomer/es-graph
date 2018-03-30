@@ -3,7 +3,7 @@ package es
 import play.api.libs.json.{Format, Json}
 import play.api.libs.ws.{WSClient, WSResponse}
 
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future}
 
 case class IndexSettings(number_of_shards: Int, number_of_replicas: Int)
 
@@ -46,15 +46,22 @@ case object IndexAndMapping {
   implicit val _: Format[IndexAndMapping] = Json.format
 }
 
-class ESIndexMappings {
+class ESIndexAndMappingsCreator {
 
-  def createIndexAndMappings(indexName: String, typeName: String, mappingMap: Map[String, String])(implicit ws: WSClient): Future[WSResponse] = {
-
+  def createIndexAndMappings(indexName: String, typeName: String, mappingMap: Map[String, String])
+                            (implicit ws: WSClient, ec: ExecutionContext): Future[WSResponse] = {
     val indexAndMappings = IndexAndMapping(IndexSettings(3, 2), Mappings(PropertiesWrapper(mappingMap.toList)))
-
     ws.url("http://localhost:9200/" + indexName)
       .addHttpHeaders("Content-Type" -> "application/json")
       .put(indexAndMappings.getJsonForIndexType(typeName))
   }
 
+}
+
+object ESIndexAndMappingsCreator {
+  def deleteIndex(indexName: String)(implicit ws: WSClient, ec: ExecutionContext): Future[WSResponse] = {
+    ws.url("http://localhost:9200/" + indexName)
+      .addHttpHeaders("Content-Type" -> "application/json")
+      .delete()
+  }
 }

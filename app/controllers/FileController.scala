@@ -2,39 +2,62 @@ package controllers
 
 import java.nio.file.Paths
 
-import es.ESIndexMappings
+import es.{ESDataIngestor, ESIndexAndMappingsCreator}
 import javax.inject.Inject
-import play.api.libs.json.{Format, Json}
+import play.api.libs.json.Json
 import play.api.libs.ws._
 import play.api.mvc.{AbstractController, ControllerComponents}
 
-import scala.annotation.tailrec
+import scala.concurrent.{ExecutionContext, Future}
 import scala.io.Source
+import scala.util.control.NonFatal
 
-class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esIndexMappings: ESIndexMappings)(implicit ws: WSClient = wsClient)
-  extends AbstractController(cc) {
+class FileController @Inject()(cc: ControllerComponents,
+                               wsClient: WSClient,
+                               esIndexMappings: ESIndexAndMappingsCreator,
+                               esIngester: ESDataIngestor)
+                              (implicit ws: WSClient = wsClient,
+                               ec: ExecutionContext) extends AbstractController(cc) {
 
-  def readCSVFile() = Action(parse.multipartFormData) { implicit request =>
+  def readCSVFile() = Action.async(parse.multipartFormData) { implicit request =>
 
-    val recordsJson = request.body.file("uploadedFile").map { uploadedFile =>
+    request.body.file("uploadedFile") match {
+      case Some(uploadedFile) =>
+        val fileName = Paths.get(uploadedFile.filename).getFileName.toString.toLowerCase
+        val lines: List[String] = Source.fromFile(uploadedFile.ref.getAbsoluteFile).getLines().toList
+        val headers = lines.headOption.getOrElse("").split(",").toList
 
-      val lines: Iterator[String] = Source.fromFile(uploadedFile.ref.getAbsoluteFile).getLines()
+        val recordsMap: List[Map[String, String]] = lines.drop(1).map { line =>
+          val records = line.split(",").toList
+          (headers zip records).toMap
+        }
 
-      val headers = lines.next().split(",").toList
+        val indexName = "csv_data"
+        val headerTypes = generateHeaderTypes(headers, recordsMap)
 
-      val recordsMap: List[Map[String, String]] = lines.drop(1).toList.map { line =>
-        val records = line.split(",").toList
-        (headers zip records).toMap
-      }
+        esIndexMappings.createIndexAndMappings(indexName, fileName, headerTypes).flatMap(indexingResponse =>
+          if (indexingResponse.status == 200 || indexingResponse.status == 201) {
+            esIngester.bulkIndex(indexName, fileName, recordsMap).map(ingestionResponse =>
+              if (ingestionResponse.status == 200 || ingestionResponse.status == 201) {
+                Ok(Json.stringify(Json.toJson(headerTypes))).as("application/json")
+              } else {
+                BadRequest("{\"error\": \"Data couldn't be indexed in elastic search. HTTP status ES - " +
+                  ingestionResponse.status + ". The index, though, is in there intact.\"}")
+                  .as("application/json")
+              }).recover {
+              case NonFatal(ex: Exception) => ESIndexAndMappingsCreator.deleteIndex(indexName)
+                BadRequest("{\"error\": \"Index couldn't be created in elastic search. HTTP status ES - "
+                  + indexingResponse.status + "\"}").as("application/json")
+            }
+          } else {
+            Future.successful(BadRequest("{\"error\": \"Index couldn't be created in elastic search. HTTP status ES - " +
+              indexingResponse.status + ". If you've already ingested data then run the analytics over it. Or " +
+              "rename your CSV file.\"}").as("application/json"))
+          })
 
-      val headerTypes = generateHeaderTypes(headers, recordsMap) //Use header types in ES
+      case None => Future.successful(BadRequest("{\"error\" : \"The file hasn't been received or recieved partially.\""))
+    }
 
-      esIndexMappings.createIndexAndMappings("csv_data", Paths.get(uploadedFile.filename).getFileName.toString.toLowerCase, headerTypes)
-
-      Json.prettyPrint(Json.toJson(headerTypes))
-    }.getOrElse("{data: null}")
-
-    Ok(recordsJson).as("application/json")
   }
 
   /**
@@ -45,9 +68,6 @@ class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esI
     * An array (A field may or may not have comma separated values. We will focus on no to implement for now.)
     * A boolean
     * A null
-    *
-    * --> The goal of this method is to create the JSON out of map so that
-    * String values which can be number be converted to the number.
     *
     * @param headers The headers in the CSV file
     * @param records The records (rows) in CSV file
@@ -70,34 +90,18 @@ class FileController @Inject()(cc: ControllerComponents, wsClient: WSClient, esI
     )
   }
 
-  def isLongRecord(recordOptValue: Option[String]): Boolean = {
+  private def isLongRecord(recordOptValue: Option[String]): Boolean = {
     val doublePattern = "\\d+"
     recordOptValue.getOrElse("%").trim.matches(doublePattern)
   }
 
-  def isDoubleRecord(recordOptValue: Option[String]): Boolean = {
+  private def isDoubleRecord(recordOptValue: Option[String]): Boolean = {
     val doublePattern = "((\\d+)(\\.{1})(\\d+)?)|([0-9]+)|(([0])(\\.)(\\d+))"
     recordOptValue.getOrElse("%").trim.matches(doublePattern)
   }
 
-  def isBooleanRecord(recordOptValue: Option[String]): Boolean = {
+  private def isBooleanRecord(recordOptValue: Option[String]): Boolean = {
     List("true", "false").contains(recordOptValue.getOrElse("").toLowerCase.trim)
-  }
-
-  @tailrec
-  private def createStringToDoubleJsonMap(jsonMap: Map[String, String],
-                                          resultMap: Map[String, Double] = Map.empty[String, Double]): Map[String, Double] = {
-    if (jsonMap.isEmpty) {
-      return resultMap
-    }
-
-    val firstKeyValue = jsonMap.toList.head
-
-    if (firstKeyValue._2.matches("((\\d+)(\\.{1})?(\\d+))|(^(0)(.)(\\d+))")) {
-      createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap + (firstKeyValue._1 -> firstKeyValue._1.toDouble))
-    } else {
-      createStringToDoubleJsonMap(jsonMap.toList.drop(1).toMap, resultMap)
-    }
   }
 
 }
