@@ -1,6 +1,6 @@
 package es
 
-import play.api.libs.json.{Format, Json}
+import play.api.libs.json._
 import play.api.libs.ws.{WSClient, WSResponse}
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -14,36 +14,39 @@ object IndexSettings {
 case class Type(`type`: String)
 
 object Type {
-  implicit val _: Format[Type] = Json.format
+  implicit val _: OFormat[Type] = Json.format
 }
 
 case class PropertiesWrapper(properties: Map[String, Type])
 
 object PropertiesWrapper {
   def apply(headerMappings: List[(String, String)]): PropertiesWrapper = {
-    val properties = headerMappings.foldLeft(Map.empty[String, Type]) {
-      (headerTypeMap, headerMappingsTuple) =>
-        headerTypeMap + (headerMappingsTuple._1 -> Type(headerMappingsTuple._2))
-    }
+    val properties = headerMappings.foldLeft(Map.empty[String, Type]) ((headerTypeMap, headerMappingsTuple) =>
+        headerTypeMap + (headerMappingsTuple._1 -> Type(headerMappingsTuple._2)))
     new PropertiesWrapper(properties)
   }
 
-  implicit val _: Format[PropertiesWrapper] = Json.format
+  implicit val _: OFormat[PropertiesWrapper] = Json.format
 }
 
-case class Mappings(typeName123456789012345678901234567890: PropertiesWrapper)
+case class Mappings(typeName: PropertiesWrapper)
 
 object Mappings {
-  implicit val _: Format[Mappings] = Json.format
+  implicit val _: OFormat[Mappings] = Json.format
 }
 
 case class IndexAndMapping(settings: IndexSettings, mappings: Mappings) {
-  def getJsonForIndexType(`type`: String) = Json.prettyPrint(Json.toJson(this))
-    .replace("typeName123456789012345678901234567890", `type`)
+  def getJsonForIndexType(typeName: String) = {
+    val jsonMap = Json.toJsObject(this).value
+    val mappings = Json.toJsObject(jsonMap("mappings").as[Mappings]).value
+    val updatedMappings = mappings + ((typeName, mappings("typeName"))) - "typeName"
+    val updatedJsonMap = jsonMap ++ updatedMappings - "mappings"
+    Json.prettyPrint(Json.toJson(updatedJsonMap))
+  }
 }
 
-case object IndexAndMapping {
-  implicit val _: Format[IndexAndMapping] = Json.format
+object IndexAndMapping {
+  implicit val _: OFormat[IndexAndMapping] = Json.format
 }
 
 class ESIndexAndMappingsCreator {
